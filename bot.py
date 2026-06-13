@@ -28,7 +28,7 @@ telebot.apihelper.CUSTOM_REQUEST_SENDER = custom_sender
 # ---------------------------
 
 # BOT TOKEN YAHAN DALO
-TOKEN = "8758538601:AAH9ce6ssWofcncdbZACpKD3XXQOr60Hzsg" 
+TOKEN = "8857508546:AAE1BBVDC-fMm50pNIvocnHeTYzurIZ1eOE" 
 bot = telebot.TeleBot(TOKEN)
 
 # Data Storage & Folders
