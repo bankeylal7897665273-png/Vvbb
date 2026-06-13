@@ -9,7 +9,9 @@ import subprocess
 import urllib3
 import shutil
 import sys
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import sqlite3
+import functools
+from http.server import SimpleHTTPRequestHandler, HTTPServer
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -26,38 +28,51 @@ telebot.apihelper.CUSTOM_REQUEST_SENDER = custom_sender
 # ---------------------------
 
 # BOT TOKEN YAHAN DALO
-TOKEN = "8857508546:AAE1BBVDC-fMm50pNIvocnHeTYzurIZ1eOE" 
+TOKEN = "8758538601:AAH9ce6ssWofcncdbZACpKD3XXQOr60Hzsg" 
 bot = telebot.TeleBot(TOKEN)
 
-# Data Storage File
-DATA_FILE = "host_data.json"
+# Data Storage & Folders
+DB_FILE = "host_data.db"
 PROJECTS_DIR = "hosted_projects"
 
-# Memory tracking
 user_states = {}
 upload_sessions = {}
 running_processes = {}
-active_admins = set() # Admin security ke liye
+active_admins = set() 
 
-# Initialize Data & Folders
 if not os.path.exists(PROJECTS_DIR):
     os.makedirs(PROJECTS_DIR)
 
+# --- SQLITE DATABASE SYSTEM ---
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("CREATE TABLE IF NOT EXISTS store (id INTEGER PRIMARY KEY, data TEXT)")
+    conn.commit()
+    conn.close()
+
 def load_data():
-    if not os.path.exists(DATA_FILE):
-        return {"users": {}, "admin_upi": "", "base_url": "URL_NOT_SET", "pending_requests": {}, "admin_pass": "BOTPY123"}
-    try:
-        with open(DATA_FILE, "r") as f:
-            data = json.load(f)
-            if "admin_pass" not in data:
-                data["admin_pass"] = "BOTPY123"
-            return data
-    except:
+    init_db()
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT data FROM store WHERE id=1")
+    row = c.fetchone()
+    conn.close()
+    if row:
+        data = json.loads(row[0])
+        if "admin_pass" not in data:
+            data["admin_pass"] = "BOTPY123"
+        return data
+    else:
         return {"users": {}, "admin_upi": "", "base_url": "URL_NOT_SET", "pending_requests": {}, "admin_pass": "BOTPY123"}
 
 def save_data(data):
-    with open(DATA_FILE, "w") as f:
-        json.dump(data, f, indent=4)
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("DELETE FROM store WHERE id=1")
+    c.execute("INSERT INTO store (id, data) VALUES (1, ?)", (json.dumps(data),))
+    conn.commit()
+    conn.close()
 
 db = load_data()
 
@@ -98,7 +113,7 @@ def admin_menu():
 # --- USER COMMANDS ---
 @bot.message_handler(commands=['start'])
 def start_cmd(message):
-    get_user(message.from_user.id) # register
+    get_user(message.from_user.id)
     user_states.pop(message.from_user.id, None)
     text = f"HI WOLKOWM TO PYTHON HOSTING BOT FOR DEV @Darkaura9999\nOK ENJOY BOT"
     bot.send_message(message.chat.id, text, reply_markup=main_menu())
@@ -128,14 +143,10 @@ def handle_amount_state(message):
     user_id = message.from_user.id
     try:
         amount = float(message.text)
-        if amount <= 0:
-            raise ValueError
-        
+        if amount <= 0: raise ValueError
         admin_upi = db["admin_upi"]
         qr_url = f"https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=upi://pay?pa={admin_upi}&pn=Admin&am={amount}"
-        
         user_states[user_id] = f"waiting_for_utr_{amount}"
-        
         bot.send_photo(message.chat.id, qr_url, caption=f"Scan this QR to pay ₹{amount}.\nPay ke bad 12 anko ka UTR dale:")
     except:
         bot.send_message(message.chat.id, "Invalid amount.", reply_markup=main_menu())
@@ -147,11 +158,9 @@ def handle_utr_state(message):
     state = user_states[user_id]
     amount = float(state.split("_")[3])
     utr = message.text.strip()
-    
     req_id = str(int(time.time()))
     db["pending_requests"][req_id] = {"user_id": user_id, "amount": amount, "utr": utr}
     save_data(db)
-    
     bot.send_message(message.chat.id, "Request sent to Admin. Wait for approval.", reply_markup=main_menu())
     user_states.pop(user_id, None)
 
@@ -176,17 +185,13 @@ def host_py(message):
 @bot.message_handler(func=lambda message: message.from_user.id in user_states and user_states[message.from_user.id] == "waiting_for_host_type")
 def select_host_type(message):
     choice = message.text
-    if choice not in ["FREE", "PAID"]:
-        return
-    
+    if choice not in ["FREE", "PAID"]: return
     user_id = message.from_user.id
     user = get_user(user_id)
-    
     if choice == "PAID" and user["balance"] < 5:
         bot.send_message(message.chat.id, "Aapka balance kam hai PAID ke liye (Minimum ₹5 chahiye). ADD BALANCE karein.", reply_markup=main_menu())
         user_states.pop(user_id, None)
         return
-        
     upload_sessions[user_id] = {"type": choice, "files": [], "project_name": ""}
     user_states[user_id] = "waiting_for_project_name"
     bot.send_message(message.chat.id, "Project Name do (No spaces):", reply_markup=back_menu())
@@ -196,7 +201,6 @@ def get_proj_name(message):
     user_id = message.from_user.id
     proj_name = message.text.strip().replace(" ", "_")
     upload_sessions[user_id]["project_name"] = proj_name
-    
     user_states[user_id] = "uploading_files"
     bot.send_message(message.chat.id, "UPLOAD YOUR FILES (.py, .txt). Upload hone ke baad /done bhejein.", reply_markup=back_menu())
 
@@ -205,18 +209,14 @@ def handle_docs(message):
     user_id = message.from_user.id
     try:
         file_info = bot.get_file(message.document.file_id)
-        
-        # FIXED: IP Bypass for file download
         file_url = f"https://149.154.167.220/file/bot{TOKEN}/{file_info.file_path}"
         response = requests.get(file_url, headers={'Host': 'api.telegram.org'}, verify=False)
         downloaded_file = response.content
-        
         file_name = message.document.file_name
-        
         proj_name = upload_sessions[user_id]["project_name"]
+        
         save_dir = os.path.join(PROJECTS_DIR, str(user_id), proj_name)
-        if not os.path.exists(save_dir):
-            os.makedirs(save_dir)
+        if not os.path.exists(save_dir): os.makedirs(save_dir)
             
         with open(os.path.join(save_dir, file_name), 'wb') as new_file:
             new_file.write(downloaded_file)
@@ -226,44 +226,41 @@ def handle_docs(message):
     except Exception as e:
         bot.send_message(message.chat.id, f"Error saving file: {str(e)}")
 
-@bot.message_handler(commands=['done'], func=lambda message: message.from_user.id in user_states and user_states[message.from_user.id] == "uploading_files")
-def done_upload(message):
+# COMMON DONE HANDLER (FOR HOST AND FILE MANAGER)
+@bot.message_handler(commands=['done'])
+def handle_done_all(message):
     user_id = message.from_user.id
-    session = upload_sessions.get(user_id)
+    state = str(user_states.get(user_id, ""))
     
-    if not session or not session["files"]:
-        bot.send_message(message.chat.id, "Koi file upload nahi hui. Cancelled.", reply_markup=main_menu())
+    if state == "uploading_files":
+        session = upload_sessions.get(user_id)
+        if not session or not session["files"]:
+            bot.send_message(message.chat.id, "Koi file upload nahi hui. Cancelled.", reply_markup=main_menu())
+            user_states.pop(user_id, None)
+            return
+            
+        proj_name = session["project_name"]
+        host_type = session["type"]
+        
+        db["users"][str(user_id)]["projects"][proj_name] = {"type": host_type, "files": session["files"], "status": "STOPPED"}
+        if host_type == "PAID": db["users"][str(user_id)]["balance"] -= 5.0
+        save_data(db)
+        
+        file_list = "\n".join(session["files"])
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("RUN", callback_data=f"run_{user_id}_{proj_name}"))
+        
+        bot.send_message(message.chat.id, f"Files Uploaded for {proj_name}:\n{file_list}\n\nProject Type: {host_type}", reply_markup=markup)
+        bot.send_message(message.chat.id, "Main Menu", reply_markup=main_menu())
         user_states.pop(user_id, None)
-        return
+        upload_sessions.pop(user_id, None)
         
-    proj_name = session["project_name"]
-    host_type = session["type"]
-    
-    # Save to DB
-    user_id_str = str(user_id)
-    db["users"][user_id_str]["projects"][proj_name] = {
-        "type": host_type,
-        "files": session["files"],
-        "status": "STOPPED"
-    }
-    
-    if host_type == "PAID":
-        db["users"][user_id_str]["balance"] -= 5.0
-        
-    save_data(db)
-    
-    file_list = "\n".join(session["files"])
-    text = f"Files Uploaded for {proj_name}:\n{file_list}\n\nProject Type: {host_type}"
-    
-    markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("RUN", callback_data=f"run_{user_id}_{proj_name}"))
-    
-    bot.send_message(message.chat.id, text, reply_markup=markup)
-    bot.send_message(message.chat.id, "Main Menu", reply_markup=main_menu())
-    user_states.pop(user_id, None)
-    upload_sessions.pop(user_id, None)
+    elif state.startswith("fm_uploading_"):
+        proj_name = state.split("_")[2]
+        bot.send_message(message.chat.id, f"Checking karega... ✅ Sab files project '{proj_name}' me add ho gayi hain!", reply_markup=main_menu())
+        user_states.pop(user_id, None)
 
-# --- RUN BOTS LOGIC ---
+# --- RUN BOTS LOGIC W/ REAL LOGS ---
 @bot.callback_query_handler(func=lambda call: call.data.startswith("run_"))
 def run_project_callback(call):
     data = call.data.split("_")
@@ -279,27 +276,25 @@ def run_project_callback(call):
     
     if os.path.exists(req_file):
         bot.edit_message_text("Installing Requirements...\nLogs: pip install processing...", call.message.chat.id, msg_id)
-        # Using sys.executable to ensure it uses the correct pip environment
         subprocess.run([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], cwd=proj_path)
         time.sleep(2)
         bot.edit_message_text("Installing Requirements... ✅ OK HARA", call.message.chat.id, msg_id)
     
-    # Find main py file
     py_files = [f for f in os.listdir(proj_path) if f.endswith('.py')]
     if not py_files:
         bot.edit_message_text("❌ No .py file found to run.", call.message.chat.id, msg_id)
         return
         
-    main_file = py_files[0] # defaults to first py file
-    
-    bot.edit_message_text(f"Starting {main_file}...\nLogs: LIVE 🟢", call.message.chat.id, msg_id)
-    
+    main_file = py_files[0] 
     process_key = f"{user_id}_{proj_name}"
     
     if process_key in running_processes:
         running_processes[process_key].terminate()
         
-    proc = subprocess.Popen([sys.executable, main_file], cwd=proj_path)
+    # REAL LOGS SYSTEM
+    log_path = os.path.join(proj_path, "logs.txt")
+    log_file = open(log_path, "w")
+    proc = subprocess.Popen([sys.executable, main_file], cwd=proj_path, stdout=log_file, stderr=subprocess.STDOUT)
     running_processes[process_key] = proc
     
     db["users"][str(user_id)]["projects"][proj_name]["status"] = "LIVE"
@@ -307,9 +302,9 @@ def run_project_callback(call):
     
     proj_type = db["users"][str(user_id)]["projects"][proj_name]["type"]
     base_url = db.get("base_url", "URL_NOT_SET")
-    url = f"{base_url}/{proj_name}"
+    url = f"{base_url}/{user_id}/{proj_name}/"
     
-    success_text = f"✅ Project {proj_name} is LIVE!\nType: {proj_type}\nURL: {url}\nLogs: ALL OK HARA"
+    success_text = f"✅ Project {proj_name} is LIVE!\nType: {proj_type}\nURL: {url}\nLogs: 100% REAL LIVE 🟢 (Visit URL to see files & logs.txt)"
     bot.edit_message_text(success_text, call.message.chat.id, msg_id)
     
     if proj_type == "FREE":
@@ -321,15 +316,12 @@ def sleep_bot(user_id, proj_name):
     if process_key in running_processes:
         running_processes[process_key].terminate()
         del running_processes[process_key]
-        
     user_id_str = str(user_id)
     if user_id_str in db["users"] and proj_name in db["users"][user_id_str]["projects"]:
         db["users"][user_id_str]["projects"][proj_name]["status"] = "SLEEP"
         save_data(db)
-        try:
-            bot.send_message(user_id, f"💤 Aapka FREE project '{proj_name}' 2 min baad SLEEP MOD me chala gaya hai.")
-        except:
-            pass
+        try: bot.send_message(user_id, f"💤 Aapka FREE project '{proj_name}' 2 min baad SLEEP MOD me chala gaya hai.")
+        except: pass
 
 @bot.message_handler(func=lambda message: message.text == "RUN BOTS")
 def run_bots_menu(message):
@@ -338,31 +330,27 @@ def run_bots_menu(message):
     if not projects:
         bot.send_message(message.chat.id, "No projects hosted.", reply_markup=main_menu())
         return
-        
     text = "Your Hosted Projects:\n"
     markup = InlineKeyboardMarkup()
     for p_name, p_data in projects.items():
         text += f"- {p_name} ({p_data['status']})\n"
         markup.add(InlineKeyboardButton(f"RUN {p_name}", callback_data=f"run_{user_id}_{p_name}"))
-        
     bot.send_message(message.chat.id, text, reply_markup=markup)
 
-# --- MY LIST & FILE MANAGER ---
+# --- MY LIST & FILE MANAGER (WITH ADD/CREATE) ---
 @bot.message_handler(func=lambda message: message.text == "MY LIST")
 def my_list_cmd(message):
     user_id = str(message.from_user.id)
     projects = db["users"].get(user_id, {}).get("projects", {})
-    
     if not projects:
         bot.send_message(message.chat.id, "No projects found.")
         return
         
     base_url = db.get("base_url", "URL_NOT_SET")
     text = "📂 ALL LIST\n\n"
-    
     for p_name, p_data in projects.items():
         file_count = len(p_data.get("files", []))
-        text += f"Project: {p_name}\nStatus: {p_data['status']}\nFiles: {file_count}\nURL: {base_url}/{p_name}\n\n"
+        text += f"Project: {p_name}\nStatus: {p_data['status']}\nFiles: {file_count}\nURL: {base_url}/{user_id}/{p_name}/\n\n"
         
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("FILE MANAGER", callback_data="open_file_manager"))
@@ -384,11 +372,78 @@ def fm_select_project(message):
         return
         
     user_states[int(user_id)] = f"fm_manage_{proj_name}"
-    
     files = projects[proj_name]["files"]
     text = f"Files in {proj_name}:\n" + "\n".join(files) + "\n\nKonsi file me kam karna hai? Name dalo:"
-    bot.send_message(message.chat.id, text)
+    
+    markup = InlineKeyboardMarkup()
+    markup.row(InlineKeyboardButton("📤 UPLOAD / ADD FILE", callback_data=f"fm_add_{proj_name}"))
+    markup.row(InlineKeyboardButton("📄 CREATE NEW FILE", callback_data=f"fm_create_{proj_name}"))
+    
+    bot.send_message(message.chat.id, text, reply_markup=markup)
 
+# FILE MANAGER: UPLOAD FILES
+@bot.callback_query_handler(func=lambda call: call.data.startswith("fm_add_"))
+def fm_add_start(call):
+    proj_name = call.data.split("_")[2]
+    user_states[call.from_user.id] = f"fm_uploading_{proj_name}"
+    bot.edit_message_text("Agar aapko apni file upload karni hai ya add karni hai toh apni file upload karke send kar do.", call.message.chat.id, call.message.message_id)
+
+@bot.message_handler(content_types=['document'], func=lambda message: str(user_states.get(message.from_user.id, "")).startswith("fm_uploading_"))
+def fm_handle_extra_docs(message):
+    user_id = message.from_user.id
+    proj_name = user_states[user_id].split("_")[2]
+    try:
+        file_info = bot.get_file(message.document.file_id)
+        file_url = f"https://149.154.167.220/file/bot{TOKEN}/{file_info.file_path}"
+        response = requests.get(file_url, headers={'Host': 'api.telegram.org'}, verify=False)
+        file_name = message.document.file_name
+        
+        save_path = os.path.join(PROJECTS_DIR, str(user_id), proj_name, file_name)
+        with open(save_path, 'wb') as new_file:
+            new_file.write(response.content)
+            
+        if file_name not in db["users"][str(user_id)]["projects"][proj_name]["files"]:
+            db["users"][str(user_id)]["projects"][proj_name]["files"].append(file_name)
+            save_data(db)
+            
+        bot.send_message(message.chat.id, f"Received file: {file_name}\nAgar jo aapko bas itni hi upload karni hai to /done bhejo. Hum ise aapke project me add kar denge. Agar aur karni hai to upload kar sakte hain.")
+    except Exception as e:
+        bot.send_message(message.chat.id, f"Error: {str(e)}")
+
+# FILE MANAGER: CREATE NEW FILE
+@bot.callback_query_handler(func=lambda call: call.data.startswith("fm_create_"))
+def fm_create_start(call):
+    proj_name = call.data.split("_")[2]
+    user_states[call.from_user.id] = f"fm_create_name_{proj_name}"
+    bot.edit_message_text("Apni nai file ka name dalo (e.g. main.py):", call.message.chat.id, call.message.message_id)
+
+@bot.message_handler(func=lambda message: str(user_states.get(message.from_user.id, "")).startswith("fm_create_name_"))
+def fm_create_name(message):
+    user_id = message.from_user.id
+    proj_name = user_states[user_id].split("_")[3]
+    file_name = message.text.strip()
+    user_states[user_id] = f"fm_create_code_{proj_name}_{file_name}"
+    bot.send_message(message.chat.id, f"Ab {file_name} ka code yahan paste karo:")
+
+@bot.message_handler(func=lambda message: str(user_states.get(message.from_user.id, "")).startswith("fm_create_code_"))
+def fm_create_code(message):
+    user_id = message.from_user.id
+    data = user_states[user_id].split("_")
+    proj_name = data[3]
+    file_name = data[4]
+    
+    save_path = os.path.join(PROJECTS_DIR, str(user_id), proj_name, file_name)
+    with open(save_path, "w", encoding="utf-8") as f:
+        f.write(message.text)
+        
+    if file_name not in db["users"][str(user_id)]["projects"][proj_name]["files"]:
+        db["users"][str(user_id)]["projects"][proj_name]["files"].append(file_name)
+        save_data(db)
+        
+    bot.send_message(message.chat.id, f"✅ {file_name} successfully create aur save ho gayi!", reply_markup=main_menu())
+    user_states.pop(user_id, None)
+
+# FILE MANAGER: EDIT/DELETE EXISTING
 @bot.message_handler(func=lambda message: message.from_user.id in user_states and str(user_states[message.from_user.id]).startswith("fm_manage_"))
 def fm_select_file(message):
     user_id = message.from_user.id
@@ -397,7 +452,7 @@ def fm_select_file(message):
     
     projects = db["users"][str(user_id)]["projects"]
     if file_name not in projects[proj_name]["files"]:
-        bot.send_message(message.chat.id, "File nahi mili.")
+        bot.send_message(message.chat.id, "File nahi mili. Sahi name type karein ya buttons use karein.")
         return
         
     markup = InlineKeyboardMarkup()
@@ -412,15 +467,13 @@ def fm_select_file(message):
 def fm_delete_file(call):
     data = call.data.split("_")
     user_id, proj_name, file_name = data[1], data[2], data[3]
-    
     proj_path = os.path.join(PROJECTS_DIR, user_id, proj_name)
     file_path = os.path.join(proj_path, file_name)
     
-    if os.path.exists(file_path):
-        os.remove(file_path)
-        
-    db["users"][user_id]["projects"][proj_name]["files"].remove(file_name)
-    save_data(db)
+    if os.path.exists(file_path): os.remove(file_path)
+    if file_name in db["users"][user_id]["projects"][proj_name]["files"]:
+        db["users"][user_id]["projects"][proj_name]["files"].remove(file_name)
+        save_data(db)
     
     bot.edit_message_text("✅ File Deleted", call.message.chat.id, call.message.message_id)
 
@@ -428,7 +481,6 @@ def fm_delete_file(call):
 def fm_edit_file(call):
     data = call.data.split("_")
     user_id, proj_name, file_name = int(data[1]), data[2], data[3]
-    
     user_states[user_id] = f"fm_upload_new_{proj_name}_{file_name}"
     bot.edit_message_text("OK AB AAP APNE NEW CODE DO. (Text message ya new file bhejo)", call.message.chat.id, call.message.message_id)
 
@@ -440,26 +492,19 @@ def fm_save_new_code(message):
     file_name = state_data[4]
     
     save_path = os.path.join(PROJECTS_DIR, str(user_id), proj_name, file_name)
-    
     try:
         if message.content_type == 'text':
             with open(save_path, 'w', encoding='utf-8') as f:
                 f.write(message.text)
         elif message.content_type == 'document':
             file_info = bot.get_file(message.document.file_id)
-            
-            # FIXED: IP Bypass for file download in edit mode too
             file_url = f"https://149.154.167.220/file/bot{TOKEN}/{file_info.file_path}"
             response = requests.get(file_url, headers={'Host': 'api.telegram.org'}, verify=False)
-            downloaded_file = response.content
-            
             with open(save_path, 'wb') as f:
-                f.write(downloaded_file)
-                
+                f.write(response.content)
         bot.send_message(message.chat.id, f"✅ Code updated in {file_name}!", reply_markup=main_menu())
     except Exception as e:
         bot.send_message(message.chat.id, f"Error: {str(e)}")
-        
     user_states.pop(user_id, None)
 
 # --- ADMIN PANEL ---
@@ -524,8 +569,7 @@ def admin_set_link(message):
 @bot.message_handler(func=lambda message: message.from_user.id in user_states and user_states[message.from_user.id] == "waiting_for_admin_link" and message.from_user.id in active_admins)
 def admin_save_link(message):
     url = message.text.strip()
-    if url.endswith("/"):
-        url = url[:-1]
+    if url.endswith("/"): url = url[:-1]
     db["base_url"] = url
     save_data(db)
     bot.send_message(message.chat.id, f"Link Set to: {db['base_url']}", reply_markup=admin_menu())
@@ -538,7 +582,6 @@ def admin_user_info(message):
         text += f"\nUser: {uid}\n"
         for pname, pdata in udata["projects"].items():
             text += f"  - {pname} ({pdata['type']}) [{pdata['status']}]\n"
-            
     bot.send_message(message.chat.id, text)
 
 @bot.message_handler(func=lambda message: message.text == "TOTAL PROJECT INFO" and message.from_user.id in active_admins)
@@ -546,23 +589,17 @@ def admin_total_info(message):
     total = sum(len(u["projects"]) for u in db["users"].values())
     live = sum(1 for u in db["users"].values() for p in u["projects"].values() if p["status"] == "LIVE")
     sleep = sum(1 for u in db["users"].values() for p in u["projects"].values() if p["status"] == "SLEEP")
-    
-    text = f"Total Projects: {total}\nLIVE: {live}\nSLEEP: {sleep}"
-    bot.send_message(message.chat.id, text)
+    bot.send_message(message.chat.id, f"Total Projects: {total}\nLIVE: {live}\nSLEEP: {sleep}")
 
 @bot.message_handler(func=lambda message: message.text == "REQUESTS INFO" and message.from_user.id in active_admins)
 def admin_req_info(message):
     if not db["pending_requests"]:
         bot.send_message(message.chat.id, "No pending requests.")
         return
-        
     for req_id, rdata in db["pending_requests"].items():
         text = f"Req ID: {req_id}\nUser: {rdata['user_id']}\nAmount: ₹{rdata['amount']}\nUTR: {rdata['utr']}"
         markup = InlineKeyboardMarkup()
-        markup.row(
-            InlineKeyboardButton("SUCCESS", callback_data=f"payacc_{req_id}"),
-            InlineKeyboardButton("REJECT", callback_data=f"payrej_{req_id}")
-        )
+        markup.row(InlineKeyboardButton("SUCCESS", callback_data=f"payacc_{req_id}"), InlineKeyboardButton("REJECT", callback_data=f"payrej_{req_id}"))
         bot.send_message(message.chat.id, text, reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("payacc_") or call.data.startswith("payrej_"))
@@ -570,52 +607,39 @@ def admin_payment_action(call):
     if call.from_user.id not in active_admins:
         bot.answer_callback_query(call.id, "You are not an admin!", show_alert=True)
         return
-
     action, req_id = call.data.split("_")
-    
     if req_id not in db["pending_requests"]:
         bot.answer_callback_query(call.id, "Req not found.", show_alert=True)
         return
-        
     rdata = db["pending_requests"].pop(req_id)
     user_id = str(rdata["user_id"])
     amount = rdata["amount"]
     utr = rdata["utr"]
-    
     user = get_user(user_id)
     
     if action == "payacc":
         user["balance"] += amount
         user["history"].append({"amount": amount, "utr": utr, "status": "SUCCESS"})
         bot.edit_message_text(f"{call.message.text}\n\n✅ SUCCESS", call.message.chat.id, call.message.message_id)
-        try:
-            bot.send_message(user_id, f"✅ ₹{amount} added to wallet! UTR: {utr}")
+        try: bot.send_message(user_id, f"✅ ₹{amount} added to wallet! UTR: {utr}")
         except: pass
     else:
         user["history"].append({"amount": amount, "utr": utr, "status": "REJECT"})
         bot.edit_message_text(f"{call.message.text}\n\n❌ REJECTED", call.message.chat.id, call.message.message_id)
-        try:
-            bot.send_message(user_id, f"❌ Payment Rejected! UTR: {utr}")
+        try: bot.send_message(user_id, f"❌ Payment Rejected! UTR: {utr}")
         except: pass
-        
     save_data(db)
 
-# --- DUMMY SERVER FOR HUGGING FACE HEALTH CHECK ---
-class DummyHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"PYTHON HOSTING BOT IS ALIVE!")
-
-def run_dummy_server():
-    server = HTTPServer(('0.0.0.0', 7860), DummyHandler)
+# --- 100% REAL URL HOSTING SERVER ---
+def run_real_server():
+    # Ye handler seedha projects ka folder show karega URL par!
+    Handler = functools.partial(SimpleHTTPRequestHandler, directory=PROJECTS_DIR)
+    server = HTTPServer(('0.0.0.0', 7860), Handler)
     server.serve_forever()
 
 if __name__ == "__main__":
-    print("PYTHON HOSTING BOT STARTED...")
-    threading.Thread(target=run_dummy_server, daemon=True).start()
+    print("PYTHON HOSTING BOT STARTED WITH SQL & REAL SERVER...")
+    threading.Thread(target=run_real_server, daemon=True).start()
     while True:
-        try:
-            bot.infinity_polling(skip_pending=True)
-        except Exception as e:
-            time.sleep(3)
+        try: bot.infinity_polling(skip_pending=True)
+        except Exception as e: time.sleep(3)
