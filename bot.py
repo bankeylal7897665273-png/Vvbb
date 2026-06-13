@@ -7,11 +7,10 @@ import json
 import os
 import subprocess
 import urllib3
-import shutil
 import sys
 import sqlite3
-import functools
-from http.server import SimpleHTTPRequestHandler, HTTPServer
+import mimetypes
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -28,7 +27,7 @@ telebot.apihelper.CUSTOM_REQUEST_SENDER = custom_sender
 # ---------------------------
 
 # BOT TOKEN YAHAN DALO
-TOKEN = "8857508546:AAE1BBVDC-fMm50pNIvocnHeTYzurIZ1eOE" 
+TOKEN = "8758538601:AAH9ce6ssWofcncdbZACpKD3XXQOr60Hzsg" 
 bot = telebot.TeleBot(TOKEN)
 
 # Data Storage & Folders
@@ -202,7 +201,7 @@ def get_proj_name(message):
     proj_name = message.text.strip().replace(" ", "_")
     upload_sessions[user_id]["project_name"] = proj_name
     user_states[user_id] = "uploading_files"
-    bot.send_message(message.chat.id, "UPLOAD YOUR FILES (.py, .txt). Upload hone ke baad /done bhejein.", reply_markup=back_menu())
+    bot.send_message(message.chat.id, "UPLOAD YOUR FILES (.py, .txt, .html). Upload hone ke baad /done bhejein.", reply_markup=back_menu())
 
 @bot.message_handler(content_types=['document'], func=lambda message: message.from_user.id in user_states and user_states[message.from_user.id] == "uploading_files")
 def handle_docs(message):
@@ -226,7 +225,7 @@ def handle_docs(message):
     except Exception as e:
         bot.send_message(message.chat.id, f"Error saving file: {str(e)}")
 
-# COMMON DONE HANDLER (FOR HOST AND FILE MANAGER)
+# COMMON DONE HANDLER
 @bot.message_handler(commands=['done'])
 def handle_done_all(message):
     user_id = message.from_user.id
@@ -242,7 +241,7 @@ def handle_done_all(message):
         proj_name = session["project_name"]
         host_type = session["type"]
         
-        db["users"][str(user_id)]["projects"][proj_name] = {"type": host_type, "files": session["files"], "status": "STOPPED"}
+        db["users"][str(user_id)]["projects"][proj_name] = {"type": host_type, "files": session["files"], "status": "STOPPED", "expire_time": 0}
         if host_type == "PAID": db["users"][str(user_id)]["balance"] -= 5.0
         save_data(db)
         
@@ -291,37 +290,25 @@ def run_project_callback(call):
     if process_key in running_processes:
         running_processes[process_key].terminate()
         
-    # REAL LOGS SYSTEM
     log_path = os.path.join(proj_path, "logs.txt")
     log_file = open(log_path, "w")
     proc = subprocess.Popen([sys.executable, main_file], cwd=proj_path, stdout=log_file, stderr=subprocess.STDOUT)
     running_processes[process_key] = proc
     
     db["users"][str(user_id)]["projects"][proj_name]["status"] = "LIVE"
+    # FREE TYPE TIMING CAPPED TO 2 HOURS (7200 SECS)
+    db["users"][str(user_id)]["projects"][proj_name]["expire_time"] = time.time() + 7200
     save_data(db)
     
     proj_type = db["users"][str(user_id)]["projects"][proj_name]["type"]
     base_url = db.get("base_url", "URL_NOT_SET")
     url = f"{base_url}/{user_id}/{proj_name}/"
     
-    success_text = f"✅ Project {proj_name} is LIVE!\nType: {proj_type}\nURL: {url}\nLogs: 100% REAL LIVE 🟢 (Visit URL to see files & logs.txt)"
+    success_text = f"✅ Project {proj_name} is LIVE!\nType: {proj_type}\nURL: {url}\nLogs: 100% REAL LIVE 🟢"
     bot.edit_message_text(success_text, call.message.chat.id, msg_id)
     
     if proj_type == "FREE":
-        bot.send_message(call.message.chat.id, f"⚠️ Note: {proj_name} is FREE. Sleep mode will activate in 2 minutes.")
-        threading.Timer(120.0, sleep_bot, args=[user_id, proj_name]).start()
-
-def sleep_bot(user_id, proj_name):
-    process_key = f"{user_id}_{proj_name}"
-    if process_key in running_processes:
-        running_processes[process_key].terminate()
-        del running_processes[process_key]
-    user_id_str = str(user_id)
-    if user_id_str in db["users"] and proj_name in db["users"][user_id_str]["projects"]:
-        db["users"][user_id_str]["projects"][proj_name]["status"] = "SLEEP"
-        save_data(db)
-        try: bot.send_message(user_id, f"💤 Aapka FREE project '{proj_name}' 2 min baad SLEEP MOD me chala gaya hai.")
-        except: pass
+        bot.send_message(call.message.chat.id, f"⚠️ Note: {proj_name} is FREE. Sleep mode will activate in 2 hours.")
 
 @bot.message_handler(func=lambda message: message.text == "RUN BOTS")
 def run_bots_menu(message):
@@ -415,7 +402,7 @@ def fm_handle_extra_docs(message):
 def fm_create_start(call):
     proj_name = call.data.split("_")[2]
     user_states[call.from_user.id] = f"fm_create_name_{proj_name}"
-    bot.edit_message_text("Apni nai file ka name dalo (e.g. main.py):", call.message.chat.id, call.message.message_id)
+    bot.edit_message_text("Apni nai file ka name dalo (e.g. index.html):", call.message.chat.id, call.message.message_id)
 
 @bot.message_handler(func=lambda message: str(user_states.get(message.from_user.id, "")).startswith("fm_create_name_"))
 def fm_create_name(message):
@@ -630,16 +617,136 @@ def admin_payment_action(call):
         except: pass
     save_data(db)
 
-# --- 100% REAL URL HOSTING SERVER ---
+
+# --- 2 HOURS SLEEP MONITOR THREAD ---
+def monitor_sleep():
+    while True:
+        current_time = time.time()
+        for uid, udata in db.get("users", {}).items():
+            for pname, pdata in udata.get("projects", {}).items():
+                if pdata.get("type") == "FREE" and pdata.get("status") == "LIVE":
+                    expire_time = pdata.get("expire_time", 0)
+                    if current_time > expire_time:
+                        process_key = f"{uid}_{pname}"
+                        if process_key in running_processes:
+                            running_processes[process_key].terminate()
+                            del running_processes[process_key]
+                        pdata["status"] = "SLEEP"
+                        save_data(db)
+                        try:
+                            bot.send_message(uid, f"💤 Aapka FREE project '{pname}' 2 Hours baad SLEEP MOD me chala gaya hai.")
+                        except:
+                            pass
+        time.sleep(30)
+
+
+# --- CUSTOM HTTP SERVER (HTML RENDER & SLEEP/WAKEUP MANAGER) ---
+class CustomHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        parts = [p for p in self.path.split('/') if p]
+        
+        if len(parts) >= 2 and parts[0].isdigit():
+            uid = parts[0]
+            pname = parts[1]
+            users_db = db.get("users", {})
+            
+            if uid in users_db and pname in users_db[uid].get("projects", {}):
+                pdata = users_db[uid]["projects"][pname]
+                
+                # WAKE UP PROJECT (15 Sec Restart Loading)
+                if pdata.get("status") == "SLEEP":
+                    threading.Thread(target=self.wake_up_project, args=(uid, pname)).start()
+                    
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html")
+                    self.end_headers()
+                    html = f"""<html><head><meta http-equiv="refresh" content="15"></head>
+                    <body style="background:#0d0d0d;color:#00ffcc;text-align:center;padding-top:150px;font-family:sans-serif;">
+                    <h2>Bot Sleep Mode Detected</h2>
+                    <p>Restarting project <b>{pname}</b>... Please wait 15 seconds.</p>
+                    <div style="margin-top:20px;border:5px solid #00ffcc;border-top:5px solid transparent;border-radius:50%;width:50px;height:50px;animation:spin 1s linear infinite;display:inline-block;"></div>
+                    <style>@keyframes spin {{ 0% {{transform: rotate(0deg);}} 100% {{transform: rotate(360deg);}} }}</style>
+                    </body></html>"""
+                    self.wfile.write(html.encode("utf-8"))
+                    return
+                
+                # KEEP ALIVE TIMER (Cap limit to 2 hours from now)
+                if pdata.get("type") == "FREE" and pdata.get("status") == "LIVE":
+                    pdata["expire_time"] = time.time() + 7200
+                    save_data(db)
+                
+                # SERVE HTML & FILES
+                subpath = "/".join(parts[2:]) if len(parts) > 2 else ""
+                proj_dir = os.path.join(PROJECTS_DIR, uid, pname)
+                
+                if not subpath:
+                    index_path = os.path.join(proj_dir, "index.html")
+                    if os.path.exists(index_path):
+                        target_file = index_path
+                    else:
+                        # Clean UI if no HTML exists (No directory leak!)
+                        self.send_response(200)
+                        self.send_header("Content-Type", "text/html")
+                        self.end_headers()
+                        html = f"""<html><body style="background:#1a1a1a;color:#fff;font-family:sans-serif;text-align:center;padding:50px;">
+                        <h2>✅ Project {pname} is LIVE 🟢</h2>
+                        <p>Your background bot is running perfectly.</p>
+                        <p><a href="/{uid}/{pname}/logs.txt" style="color:#00ffcc;font-weight:bold;">📄 View Live Logs</a></p>
+                        </body></html>"""
+                        self.wfile.write(html.encode("utf-8"))
+                        return
+                else:
+                    target_file = os.path.join(proj_dir, subpath)
+                    
+                if os.path.exists(target_file) and os.path.isfile(target_file):
+                    mime_type, _ = mimetypes.guess_type(target_file)
+                    self.send_response(200)
+                    self.send_header("Content-Type", mime_type or "text/plain")
+                    self.end_headers()
+                    with open(target_file, "rb") as f:
+                        self.wfile.write(f.read())
+                else:
+                    self.send_error(404, "File Not Found")
+                return
+
+        # Default fallback
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.end_headers()
+        self.wfile.write(b"PYTHON HOSTING BOT IS ALIVE! (100% REAL)")
+
+    def wake_up_project(self, uid, pname):
+        proj_path = os.path.join(PROJECTS_DIR, uid, pname)
+        req_file = os.path.join(proj_path, "requirements.txt")
+        if os.path.exists(req_file):
+            subprocess.run([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], cwd=proj_path)
+            
+        py_files = [f for f in os.listdir(proj_path) if f.endswith('.py')]
+        if not py_files: return
+            
+        main_file = py_files[0]
+        process_key = f"{uid}_{pname}"
+            
+        if process_key in running_processes:
+            running_processes[process_key].terminate()
+                
+        log_path = os.path.join(proj_path, "logs.txt")
+        log_file = open(log_path, "a")
+        proc = subprocess.Popen([sys.executable, main_file], cwd=proj_path, stdout=log_file, stderr=subprocess.STDOUT)
+        running_processes[process_key] = proc
+            
+        db["users"][uid]["projects"][pname]["status"] = "LIVE"
+        db["users"][uid]["projects"][pname]["expire_time"] = time.time() + 7200
+        save_data(db)
+
 def run_real_server():
-    # Ye handler seedha projects ka folder show karega URL par!
-    Handler = functools.partial(SimpleHTTPRequestHandler, directory=PROJECTS_DIR)
-    server = HTTPServer(('0.0.0.0', 7860), Handler)
+    server = HTTPServer(('0.0.0.0', 7860), CustomHandler)
     server.serve_forever()
 
 if __name__ == "__main__":
     print("PYTHON HOSTING BOT STARTED WITH SQL & REAL SERVER...")
     threading.Thread(target=run_real_server, daemon=True).start()
+    threading.Thread(target=monitor_sleep, daemon=True).start()
     while True:
         try: bot.infinity_polling(skip_pending=True)
         except Exception as e: time.sleep(3)
